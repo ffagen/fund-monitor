@@ -37,15 +37,50 @@ TRADES_FILE = os.path.expanduser('~/.openclaw/workspace/fund_trades.json')
 CACHE_TTL = 300
 
 def load_holdings():
+    """Load holdings, support both old format (amount) and new format (dict with amount/date/nav)"""
     try:
         with open(HOLDINGS_FILE, 'r') as f:
-            return json.load(f)
+            raw = json.load(f)
+        # Convert old format to new format
+        converted = {}
+        for code, value in raw.items():
+            if isinstance(value, dict):
+                converted[code] = value
+            else:
+                # Old format: just amount, assume purchase date is today
+                converted[code] = {
+                    'amount': value,
+                    'purchase_date': datetime.now().strftime('%Y-%m-%d'),
+                    'purchase_nav': None
+                }
+        return converted
     except:
         return {}
 
 def save_holdings(data):
     with open(HOLDINGS_FILE, 'w') as f:
         json.dump(data, f, indent=2)
+
+def fetch_historical_nav(fund_code, date_str):
+    """Fetch NAV for a specific date"""
+    try:
+        url = f"https://fund.eastmoney.com/pingzhongdata/{fund_code}.js"
+        headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://fund.eastmoney.com/'}
+        r = requests.get(url, headers=headers, timeout=8)
+        content = r.text
+        
+        nav_match = re.search(r'Data_netWorthTrend\s*=\s*(\[.*?\]);', content, re.DOTALL)
+        if nav_match:
+            nav_data = json.loads(nav_match.group(1))
+            target_date = datetime.strptime(date_str, '%Y-%m-%d')
+            for item in reversed(nav_data):
+                ts = item.get('x', 0) / 1000
+                nav_date = datetime.fromtimestamp(ts)
+                if nav_date.date() == target_date.date():
+                    return item.get('y')
+        return None
+    except:
+        return None
 
 def load_trades():
     try:
@@ -185,6 +220,24 @@ def fetch_all_funds_concurrent():
                 today_change = None
                 if fund_info.get('nav') and fund_info.get('yesterday_nav'):
                     today_change = round((fund_info['nav'] - fund_info['yesterday_nav']) / fund_info['yesterday_nav'] * 100, 2)
+                
+                # Calculate current value based on purchase NAV
+                hold_info = holdings.get(code, {})
+                hold_amount = hold_info.get('amount', 0) if isinstance(hold_info, dict) else hold_info
+                purchase_nav = hold_info.get('purchase_nav') if isinstance(hold_info, dict) else None
+                purchase_date = hold_info.get('purchase_date') if isinstance(hold_info, dict) else None
+                
+                # Calculate current value: shares = amount / purchase_nav, current_value = shares * current_nav
+                current_value = None
+                profit = None
+                if hold_amount and purchase_nav and fund_info.get('estimate_nav'):
+                    shares = hold_amount / purchase_nav
+                    current_value = shares * fund_info['estimate_nav']
+                    profit = current_value - hold_amount
+                elif hold_amount and fund_info.get('estimate_nav'):
+                    # No purchase NAV, can't calculate precisely
+                    current_value = hold_amount
+                
                 results.append({
                     'code': code, 'name': fund_info.get('name', FUNDS.get(code, '')),
                     'nav': fund_info.get('nav'), 'yesterday_nav': fund_info.get('yesterday_nav'),
@@ -194,6 +247,10 @@ def fetch_all_funds_concurrent():
                     'estimate_nav': fund_info.get('estimate_nav'),
                     'estimate_growth': fund_info.get('estimate_growth'),
                     'estimate_time': fund_info.get('estimate_time'),
+                    'current_value': current_value,
+                    'profit': profit,
+                    'purchase_date': purchase_date,
+                    'purchase_nav': purchase_nav,
                 })
             except:
                 results.append({'code': code, 'name': FUNDS.get(code, '')})
@@ -297,10 +354,13 @@ HTML = '''<!DOCTYPE html>
                 <input type="number" id="tradeAmount" placeholder="如：10000">
             </div>
             <div class="form-group">
-                <label>操作时间</label>
-                <input type="time" id="tradeTime" value="09:30">
+                <label>操作日期</label>
+                <div style="display:flex;gap:8px;">
+                    <input type="date" id="tradeDate" style="flex:2;padding:12px;border:1px solid #ddd;border-radius:8px;font-size:16px;">
+                    <input type="time" id="tradeTime" value="09:30" style="flex:1;padding:12px;border:1px solid #ddd;border-radius:8px;font-size:16px;">
+                </div>
             </div>
-            <div class="t2-info" id="t2Info">T+1确认: 03-10 (15点前)</div>
+            <div class="t2-info" id="t2Info">T+1确认 (15点前)</div>
             <div class="modal-btns">
                 <button class="btn" style="background:#999" onclick="hideTradeModal()">取消</button>
                 <button class="btn btn-warning" onclick="submitTrade()">确认</button>
@@ -360,8 +420,11 @@ HTML = '''<!DOCTYPE html>
             }
             list.innerHTML = fundData.map(f => {
                 const amount = f.hold_amount || 0;
-                const estValue = amount > 0 && f.yesterday_nav && f.estimate_nav ? (amount / f.yesterday_nav) * f.estimate_nav : 0;
-                totalAmount += amount; totalEstValue += estValue;
+                // Use current_value from server if available, otherwise calculate
+                const currentValue = f.current_value || (amount > 0 && f.yesterday_nav && f.estimate_nav ? (amount / f.yesterday_nav) * f.estimate_nav : amount);
+                const profit = f.profit;
+                totalAmount += amount; 
+                totalEstValue += currentValue;
                 
                 const estGrowth = f.estimate_growth || 0;
                 const estClass = estGrowth > 0 ? 'red' : estGrowth < 0 ? 'green' : '';
@@ -369,21 +432,29 @@ HTML = '''<!DOCTYPE html>
                 const estBadge = f.estimate_nav ? '<span class="fund-badge" style="background:#e6f7ff;color:#1678e1;">估</span>' : '';
                 const qdiiBadge = f.is_qdii ? '<span class="fund-badge">T+2</span>' : '';
                 
+                // Profit display
+                const profitClass = profit > 0 ? 'red' : profit < 0 ? 'green' : '';
+                const profitStr = profit !== null && profit !== undefined ? (profit >= 0 ? '+' : '') + profit.toLocaleString() : '--';
+                const profitLabel = profit !== null && profit !== undefined ? '盈亏' : '持仓金额';
+                
                 // 交易记录
                 const fundTrades = trades[f.code] || [];
                 const tradeHtml = fundTrades.length > 0 ? '<div class="trade-history">最近: ' + fundTrades.slice(-3).map(t => 
                     `${t.type==='buy'?'➕':'➖'}${t.amount}元(${t.time})`
                 ).join(' ') + '</div>' : '';
                 
+                // Purchase info
+                const purchaseInfo = f.purchase_date ? `<span style="font-size:11px;color:#999;margin-left:8px;">买入:${f.purchase_date}</span>` : '';
+                
                 return `<div class="fund-item">
-                    <div class="fund-header"><span class="fund-name">${f.code} ${f.name || f.code}${qdiiBadge}${estBadge}</span><span style="font-size:12px;color:#999;">${f.nav_date || '--'}</span></div>
+                    <div class="fund-header"><span class="fund-name">${f.code} ${f.name || f.code}${qdiiBadge}${estBadge}</span><span style="font-size:12px;color:#999;">${f.nav_date || '--'}${purchaseInfo}</span></div>
                     <div class="fund-body">
                         <div class="fund-row"><div class="fund-col"><div class="fund-label">估算净值</div><div class="fund-val price">${f.estimate_nav ? f.estimate_nav.toFixed(4) : '--'}</div></div>
                         <div class="fund-col"><div class="fund-label">估算涨跌</div><div class="fund-val ${estClass}" style="font-size:16px;font-weight:600;">${f.estimate_growth ? estStr : '--'}</div></div>
                         <div class="fund-col"><div class="fund-label">1年</div><div class="fund-val ${f.year_gain > 0 ? 'red' : 'green'}">${f.year_gain ? f.year_gain + '%' : '--'}</div></div></div>
                         <div class="fund-row" style="margin-top:10px"><div class="fund-col"><div class="fund-label">昨日净值</div><div class="fund-val">${f.yesterday_nav ? f.yesterday_nav.toFixed(4) : '--'}</div></div>
-                        <div class="fund-col"><div class="fund-label">估算市值</div><div class="fund-val price">¥${estValue.toLocaleString()}</div></div>
-                        <div class="fund-col"><div class="fund-label">持仓金额</div><div class="fund-val price">¥${amount.toLocaleString()}</div></div></div>
+                        <div class="fund-col"><div class="fund-label">当前市值</div><div class="fund-val price">¥${currentValue.toLocaleString()}</div></div>
+                        <div class="fund-col"><div class="fund-label">${profitLabel}</div><div class="fund-val price ${profitClass}">${profit !== null && profit !== undefined ? '¥' + profitStr : '¥' + amount.toLocaleString()}</div></div></div>
                     </div>
                     <div class="fund-edit"><span class="edit-label">持仓金额</span><input type="number" class="edit-input" data-code="${f.code}" value="${amount}"></div>
                     <div class="trade-btns">
@@ -408,30 +479,51 @@ HTML = '''<!DOCTYPE html>
             document.getElementById('tradeTitle').textContent = type === 'buy' ? '➕ 加仓' : '➖ 减仓';
             document.getElementById('tradeCode').value = code;
             document.getElementById('tradeAmount').value = '';
-            document.getElementById('tradeTime').value = new Date().toTimeString().slice(0,5);
-            document.getElementById('t2Info').textContent = getT2Info(code, document.getElementById('tradeTime').value);
+            document.getElementById('tradeDate').value = new Date().toISOString().slice(0,10);
+            document.getElementById('tradeTime').value = '09:30';
             document.getElementById('tradeModal').classList.add('show');
+            updateTradeT2();
         }
         
         function hideTradeModal() {
             document.getElementById('tradeModal').classList.remove('show');
         }
         
-        document.getElementById('tradeTime').addEventListener('change', function() {
-            const code = document.getElementById('tradeCode').value;
-            document.getElementById('t2Info').textContent = getT2Info(code, this.value);
-        });
+        document.getElementById('tradeTime').addEventListener('change', updateTradeT2);
+        document.getElementById('tradeDate').addEventListener('change', updateTradeT2);
+        
+        function updateTradeT2() {
+            const timeStr = document.getElementById('tradeTime').value;
+            const hour = parseInt(timeStr.split(':')[0]);
+            const dateStr = document.getElementById('tradeDate').value;
+            const date = dateStr ? new Date(dateStr) : new Date();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            
+            if (hour >= 15) {
+                const nextDay = new Date(date);
+                nextDay.setDate(nextDay.getDate() + 1);
+                if (nextDay.getDay() === 6) nextDay.setDate(nextDay.getDate() + 2);
+                if (nextDay.getDay() === 0) nextDay.setDate(nextDay.getDate() + 1);
+                const m2 = String(nextDay.getMonth() + 1).padStart(2, '0');
+                const d2 = String(nextDay.getDate()).padStart(2, '0');
+                document.getElementById('t2Info').textContent = 'T+2确认: ' + m2 + '-' + d2 + ' (15点后)';
+            } else {
+                document.getElementById('t2Info').textContent = 'T+1确认: ' + month + '-' + day + ' (15点前)';
+            }
+        }
         
         async function submitTrade() {
             const code = document.getElementById('tradeCode').value;
             const amount = parseFloat(document.getElementById('tradeAmount').value);
+            const dateStr = document.getElementById('tradeDate').value;
             const timeStr = document.getElementById('tradeTime').value;
             if (!amount || amount <= 0) { showToast('请输入金额'); return; }
             
             await fetch('/api/trade', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({code, amount, type: currentTradeType, time: timeStr})
+                body: JSON.stringify({code, amount, type: currentTradeType, date: dateStr, time: timeStr})
             });
             showToast(currentTradeType === 'buy' ? '加仓成功' : '减仓成功');
             hideTradeModal();
@@ -467,7 +559,7 @@ HTML = '''<!DOCTYPE html>
             const dateStr = document.getElementById('newFundDate').value || new Date().toISOString().slice(0,10);
             const timeStr = document.getElementById('newFundTime').value || '09:30';
             if(!code || !/^\\d{6}$/.test(code)) { showToast('请输入6位基金代码'); return; }
-            const res = await fetch('/api/add_fund', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code,amount})});
+            const res = await fetch('/api/add_fund', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code, amount, date: dateStr, time: timeStr})});
             const d = await res.json();
             if(d.success) { showToast('添加成功'); hideAddModal(); refresh(); } else { showToast(d.error || '添加失败'); }
         }
@@ -518,6 +610,7 @@ class Handler(BaseHTTPRequestHandler):
             data = self.rfile.read(length)
             req = json.loads(data.decode('utf-8'))
             code, amount, trade_type, time_str = req.get('code',''), req.get('amount',0), req.get('type','buy'), req.get('time','09:30')
+            date_str = req.get('date', datetime.now().strftime('%Y-%m-%d'))
             
             # 保存交易记录
             trades = load_trades()
@@ -561,8 +654,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({'success':False,'error':'基金代码不存在'}).encode())
                 return
             FUNDS[code] = fund_info.get('name',code)
+            
+            # Fetch historical NAV for the purchase date
+            purchase_nav = fetch_historical_nav(code, date_str)
+            if not purchase_nav:
+                # If can't find exact date NAV, use yesterday's NAV
+                purchase_nav = fund_info.get('yesterday_nav')
+            
             holdings = load_holdings()
-            holdings[code] = amount
+            holdings[code] = {
+                'amount': amount,
+                'purchase_date': date_str,
+                'purchase_nav': purchase_nav
+            }
             save_holdings(holdings)
             self.send_response(200)
             self.send_header('Content-type','application/json')
