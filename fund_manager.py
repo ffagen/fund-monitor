@@ -117,14 +117,30 @@ def set_cache(key, data):
     cache[key] = {'time': time.time(), 'data': data}
     save_cache(cache)
 
-def calc_t2(is_qdii=False):
-    """计算T+2确认日期"""
-    now = datetime.now()
-    hour = now.hour
+def calc_t2(is_qdii=False, trade_hour=None, trade_date=None):
+    """计算T+2确认日期
+    Args:
+        is_qdii: 是否为QDII基金
+        trade_hour: 交易时间的小时数（可选，默认用当前时间）
+        trade_date: 交易日期的日期字符串 YYYY-MM-DD（可选，默认用当前日期）
+    """
+    # 如果传入了交易时间，用交易时间；否则用当前时间
+    if trade_date:
+        try:
+            base_date = datetime.strptime(trade_date, '%Y-%m-%d')
+        except:
+            base_date = datetime.now()
+    else:
+        base_date = datetime.now()
+    
+    if trade_hour is not None:
+        hour = trade_hour
+    else:
+        hour = base_date.hour
     
     if is_qdii or hour >= 15:
         # QDII基金或15点后：T+2
-        t1 = now + timedelta(days=1)
+        t1 = base_date + timedelta(days=1)
         while t1.weekday() >= 5:
             t1 += timedelta(days=1)
         t2 = t1 + timedelta(days=1)
@@ -132,7 +148,7 @@ def calc_t2(is_qdii=False):
             t2 += timedelta(days=1)
     else:
         # 普通基金15点前：T+1
-        t1 = now + timedelta(days=1)
+        t1 = base_date + timedelta(days=1)
         while t1.weekday() >= 5:
             t1 += timedelta(days=1)
         t2 = None
@@ -494,22 +510,33 @@ HTML = '''<!DOCTYPE html>
         
         function updateTradeT2() {
             const timeStr = document.getElementById('tradeTime').value;
-            const hour = parseInt(timeStr.split(':')[0]);
+            const hour = parseInt(timeStr.split(':')[0]) || 9;
             const dateStr = document.getElementById('tradeDate').value;
             const date = dateStr ? new Date(dateStr) : new Date();
-            const month = String(date.getMonth() + 1).padStart(2, '0');
-            const day = String(date.getDate()).padStart(2, '0');
+            
+            // 计算下一个工作日（跳过周末）
+            function getNextWorkday(d, daysToAdd) {
+                const result = new Date(d);
+                result.setDate(result.getDate() + daysToAdd);
+                // 0=周日, 6=周六
+                while (result.getDay() === 0 || result.getDay() === 6) {
+                    result.setDate(result.getDate() + 1);
+                }
+                return result;
+            }
             
             if (hour >= 15) {
-                const nextDay = new Date(date);
-                nextDay.setDate(nextDay.getDate() + 1);
-                if (nextDay.getDay() === 6) nextDay.setDate(nextDay.getDate() + 2);
-                if (nextDay.getDay() === 0) nextDay.setDate(nextDay.getDate() + 1);
-                const m2 = String(nextDay.getMonth() + 1).padStart(2, '0');
-                const d2 = String(nextDay.getDate()).padStart(2, '0');
+                // T+2: 找后天的工作日
+                const t2 = getNextWorkday(date, 2);
+                const m2 = String(t2.getMonth() + 1).padStart(2, '0');
+                const d2 = String(t2.getDate()).padStart(2, '0');
                 document.getElementById('t2Info').textContent = 'T+2确认: ' + m2 + '-' + d2 + ' (15点后)';
             } else {
-                document.getElementById('t2Info').textContent = 'T+1确认: ' + month + '-' + day + ' (15点前)';
+                // T+1: 找明天的工作日
+                const t1 = getNextWorkday(date, 1);
+                const m1 = String(t1.getMonth() + 1).padStart(2, '0');
+                const d1 = String(t1.getDate()).padStart(2, '0');
+                document.getElementById('t2Info').textContent = 'T+1确认: ' + m1 + '-' + d1 + ' (15点前)';
             }
         }
         
@@ -545,11 +572,30 @@ HTML = '''<!DOCTYPE html>
         
         function updateAddT2() {
             const timeStr = document.getElementById('newFundTime').value;
-            const hour = parseInt(timeStr.split(':')[0]);
+            const hour = parseInt(timeStr.split(':')[0]) || 9;
+            const dateStr = document.getElementById('newFundDate').value;
+            const date = dateStr ? new Date(dateStr) : new Date();
+            
+            // 计算下一个工作日（跳过周末）
+            function getNextWorkday(d, daysToAdd) {
+                const result = new Date(d);
+                result.setDate(result.getDate() + daysToAdd);
+                while (result.getDay() === 0 || result.getDay() === 6) {
+                    result.setDate(result.getDate() + 1);
+                }
+                return result;
+            }
+            
             if (hour >= 15) {
-                document.getElementById('addT2Info').textContent = 'T+2确认 (15点后或QDII)';
+                const t2 = getNextWorkday(date, 2);
+                const m2 = String(t2.getMonth() + 1).padStart(2, '0');
+                const d2 = String(t2.getDate()).padStart(2, '0');
+                document.getElementById('addT2Info').textContent = 'T+2确认: ' + m2 + '-' + d2 + ' (15点后或QDII)';
             } else {
-                document.getElementById('addT2Info').textContent = 'T+1确认 (15点前)';
+                const t1 = getNextWorkday(date, 1);
+                const m1 = String(t1.getMonth() + 1).padStart(2, '0');
+                const d1 = String(t1.getDate()).padStart(2, '0');
+                document.getElementById('addT2Info').textContent = 'T+1确认: ' + m1 + '-' + d1 + ' (15点前)';
             }
         }
         
@@ -612,6 +658,20 @@ class Handler(BaseHTTPRequestHandler):
             code, amount, trade_type, time_str = req.get('code',''), req.get('amount',0), req.get('type','buy'), req.get('time','09:30')
             date_str = req.get('date', datetime.now().strftime('%Y-%m-%d'))
             
+            # 解析交易时间
+            trade_hour = 9
+            try:
+                trade_hour = int(time_str.split(':')[0])
+            except:
+                pass
+            
+            # 获取基金的QDII属性
+            is_qdii = code in QDII_CODES
+            
+            # 计算确认日期
+            t2_info = calc_t2(is_qdii, trade_hour, date_str)
+            confirm_date = t2_info['t2'] or t2_info['t1']
+            
             # 保存交易记录
             trades = load_trades()
             if code not in trades:
@@ -621,17 +681,41 @@ class Handler(BaseHTTPRequestHandler):
                 'amount': amount,
                 'date': date_str,
                 'time': time_str,
+                'confirm_date': confirm_date,
                 'created': datetime.now().strftime('%Y-%m-%d %H:%M')
             })
             save_trades(trades)
             
-            # 更新持仓
+            # 更新持仓 - 保留原有的购买日期和净值
             holdings = load_holdings()
-            current = holdings.get(code, 0)
+            current = holdings.get(code, {})
+            
+            # 确保 current 是 dict 格式
+            if not isinstance(current, dict):
+                # 旧格式：只有金额，假设是今天买的
+                current = {
+                    'amount': current,
+                    'purchase_date': datetime.now().strftime('%Y-%m-%d'),
+                    'purchase_nav': None
+                }
+            
+            current_amount = current.get('amount', 0)
             if trade_type == 'buy':
-                holdings[code] = current + amount
+                current['amount'] = current_amount + amount
+                # 如果没有购买记录，则记录本次购买的信息
+                if not current.get('purchase_nav'):
+                    # 尝试获取买入时的净值
+                    purchase_nav = fetch_historical_nav(code, date_str)
+                    if not purchase_nav:
+                        # 获取不到则用昨日净值
+                        fund_info = fetch_fund_data(code)
+                        purchase_nav = fund_info.get('yesterday_nav')
+                    current['purchase_date'] = date_str
+                    current['purchase_nav'] = purchase_nav
             else:
-                holdings[code] = max(0, current - amount)
+                current['amount'] = max(0, current_amount - amount)
+            
+            holdings[code] = current
             save_holdings(holdings)
             
             self.send_response(200)
