@@ -2,7 +2,7 @@
 
 ## 🆕 最新版本
 
-**v1.2.0** - 2026-03-10
+**v1.4.0** - 2026-03-30
 
 ## 📦 安装方式
 
@@ -25,11 +25,28 @@ git clone https://github.com/ffagen/fund-monitor.git ~/.openclaw/skills/ffagen__
 # 安装依赖
 pip install requests
 
-# 启动服务
+# 启动Web面板
 python3 ~/.openclaw/skills/ffagen__fund-monitor/fund_manager.py
+
+# 持仓配置分析（新增）
+python3 ~/.openclaw/skills/ffagen__fund-monitor/fund_analyzer.py
 ```
 
 访问 http://127.0.0.1:5001
+
+## ✨ 新增功能 (v1.4)
+
+- ✅ `fund_analyzer.py` 持仓配置分析模块
+- ✅ 按类别（债券/QDII/港股/A股/商品）统计分析
+- ✅ QDII基金净值延迟自动识别与标注
+- ✅ 三级风险预警：高/中/低风险问题诊断
+- ✅ 优化建议：减仓/加仓/清仓具体基金和目标占比
+
+## ✨ 新增功能 (v1.3)
+
+- ✅ 修复加仓/减仓后丢失购买信息的bug
+- ✅ 修复 T+2 计算使用错误时间的bug
+- ✅ 前端 T+2 计算正确跳过周末
 
 ## ✨ 新增功能 (v1.2)
 
@@ -38,7 +55,6 @@ python3 ~/.openclaw/skills/ffagen__fund-monitor/fund_manager.py
 - ✅ 显示当前市值（按买入净值计算）
 - ✅ 显示盈亏金额（正负用颜色区分）
 - ✅ 显示买入日期
-- ✅ 修复了若干bug
 
 ## ✨ 新增功能 (v1.0)
 
@@ -67,7 +83,8 @@ python3 ~/.openclaw/skills/ffagen__fund-monitor/fund_manager.py
 ```
 ffagen__fund-monitor/
 ├── SKILL.md           # OpenClaw 技能定义
-├── fund_manager.py    # 主程序
+├── fund_manager.py    # 主程序（Web面板）
+├── fund_analyzer.py  # 持仓配置分析（新增）
 └── README.md         # 中英双语文档
 ```
 
